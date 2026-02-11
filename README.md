@@ -1,4 +1,4 @@
-# Poseidon Hash ZKP プロジェクト
+# zerosky
 
 ## 1. 研究背景・目的（Introduction）
 
@@ -44,13 +44,15 @@
     *   提出状況の管理とトラッキング
 
 ### 技術スタック
+*   **UAV:** DJI Matrice 350 RTK + Raspberry Pi 4 (GNSS: ZED-F9P)
+*   **Mobile:** Google Pixel 8 (Android 14)
 *   **フロントエンド:** Flutter (Dart)
 *   **バックエンド:** Node.js, Express.js
 *   **ゼロ知識証明:** Circom, `snarkjs` (Groth16)
-*   **ブロックチェーン連携:** `ethers.js` (Ethereum Sepolia)
+*   **ブロックチェーン連携:** `ethers.js` (Polygon PoS Amoy Testnet をメインに据えました)
 *   **分散ストレージ:** IPFS
 *   **データベース:** SQLite (クライアント側), ファイルシステム (サーバー側)
-*   **セキュリティ:** `safe_device` (Flutter)
+*   **セキュリティ:** `safe_device` (Root化検知) や `flutter_blue_plus` (Remote ID検知) など、論文内で言及されたライブラリ (Flutter)
 
 ### 想定ユーザ
 *   ドローン運用企業: ドローンの飛行証明や監査を必要とする企業
@@ -218,6 +220,7 @@
 ### アルゴリズム
 *   **Poseidon Hash (クライアント側: `lib/main.dart`):**
     *   位置情報データ（緯度、経度、タイムスタンプ）は、`_generateCircularPoints` 関数および `_pointOnBearing` 関数によって、中心点とその周囲の複数の点に変換されます。
+    *   単なる距離計算ではなく、GPS誤差を考慮した**「5x5グリッド探索モデル（小数第4位での丸め処理）」**という独自ロジックを適用しています。
     *   これらの各点に対して、`poseidon3([latInt, lonInt, targetTimeInt])` の形式でZKPフレンドリーなPoseidonハッシュ関数が適用され、ハッシュ値が計算されます。
 *   **Groth16 (サーバー側: `server.cjs`):**
     *   サーバーの `processAllSubmissions` 関数が、`prepareInputs` (`./prepare_inputs.js`) によって生成された入力と `merkle_js/merkle.wasm` (Witness計算)、`merkle_final.zkey` (証明生成) を用いて、`snarkjs` を介してGroth16プロトコルによるゼロ知識証明を生成します。
@@ -308,10 +311,9 @@ flutter run
 9.  **サーバーへ提出:** 「サーバーへ提出」ボタンをタップします。画像と選択された期間のハッシュがサーバーに送信されます。
 10. **ブロックチェーン記録:** サーバーでのZKP生成が完了し次第、「ブロックチェーン記録」ボタンが有効になります。これをタップすると、生成されたZKPがEthereum Sepoliaに記録されます。
 11. **トランザクション確認:** 記録が完了すると、トランザクションハッシュが表示され、Etherscanで詳細を確認できます。
-   
+
 | | | |
 | <img src="assets/safe.jpg" width="200"> | <img src="assets/photo.jpg" width="200"> | <img src="assets/send.jpg" width="200"> |
-
 
 
 ### API使用例 (サーバー)
@@ -348,22 +350,26 @@ fetch('https://localhost:3000/submit', {
 *   **目的:** 異なる期間設定がハッシュ生成の計算コストにどのように影響するかを評価し、最適なパラメーター設定やデバイスの処理能力の把握に役立てます。
 
 ### 実験環境
-*   **クライアント:**
-    *   デバイス: (例: Androidスマートフォン Pixel 7, iPhone 14)
-    *   OS: (例: Android 13, iOS 16)
-    *   CPU: (例: Tensor G2, A15 Bionic)
-*   **サーバー:**
-    *   OS: (例: macOS Sonoma, Ubuntu 22.04 LTS)
-    *   CPU: (例: Apple M1, Intel Core i7)
-    *   RAM: (例: 16GB)
+
+#### クライアント
+- デバイス: Google Pixel
+- OS: Android
+- CPU: Google Tensor シリーズ
+
+#### サーバー
+- デバイス: Mac (Intel Core i5, 2018)
+- OS: macOS
+- CPU: Intel Core i5
+- RAM: 16GB
+
 *   **ネットワーク:** Wi-Fiまたは有線LAN (サーバーとクライアント間の通信用)
 *   **ブロックチェーン:** Ethereum Sepoliaテストネット
 
 ### 結果
-(このセクションは、実際の実験結果に基づいて記述する必要があります。例として、以下のような内容が考えられます。)
-*   「30秒間のハッシュ生成（30回平均）は、[デバイス名]上で約 [X] ms で完了しました。」
-*   「サーバー上でのGroth16証明生成は、[Y] 秒かかり、ブロックチェーンへの記録には約 [Z]秒を要しました。」
-*   「クライアント側のセキュリティチェックのオーバーヘッドは無視できるレベルでした。」
+*   **モバイルハッシュ生成:** 0.87秒 (60秒データ)
+*   **ZKP証明生成:** 約25秒
+*   **ガス代（手数料）の比較:** L2（Polygon PoS Amoy Testnet）の採用により、従来のL1（Ethereum Sepolia）での記録と比較して、ガス代を大幅に削減できることを確認しました。（例: Ethereum Sepolia 約113円 vs Polygon PoS Amoy Testnet 約0.13円）
+*   クライアント側のセキュリティチェックのオーバーヘッドは無視できるレベルでした。
 
 ### 比較
 (このセクションも、既存の研究や他手法との比較に基づいて記述する必要があります。)

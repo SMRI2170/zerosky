@@ -44,7 +44,7 @@
     *   提出状況の管理とトラッキング
 
 ### 技術スタック
-*   **UAV:** DJI Matrice 350 RTK + Raspberry Pi 4 (GNSS: ZED-F9P)
+*   **UAV:** DJI Matrice 300 RTK + Raspberry Pi 4 (GNSS: ZED-F9P)
 *   **Mobile:** Google Pixel 8 (Android 14)
 *   **フロントエンド:** Flutter (Dart)
 *   **バックエンド:** Node.js, Express.js

@@ -89,111 +89,139 @@
 <!-- (Note: This is a textual representation. A proper diagram would be an image.) -->
 
 ### データフロー
-1.  **データ取得:** モバイルクライアントはカメラで画像を撮影し、GPSから位置情報を取得し、Bluetooth LEで特定のドローンIDを検出します。
-2.  **ローカル処理:** 取得した位置情報と撮影時刻に基づき、複数の時間ウィンドウでPoseidonハッシュを生成し、その性能をベンチマークします。
-3.  **サーバー提出:** クライアントは画像ファイル、ドローンID、生成されたハッシュをバックエンドサーバーの `/submit` エンドポイントに送信します。
-4.  **サーバー側データ保存:** サーバーは提出されたデータを `uploads/` ディレクトリに一時保存し、提出状況を `submission-status.json` に記録します。
-5.  **IPFSへのアップロード:** サーバーは提出ディレクトリ全体をIPFSにアップロードし、そのCIDを記録します。
-6.  **IPFSウォッチャー:** サーバーは定期的にIPFS/IPNSを監視し、特定のドローンIDに関連するデータ更新（例えば、ドローンの公開鍵やその他のメタデータ）を検出します。
-7.  **ZKP生成:** IPFSから取得したドローンデータとクライアントから提出されたハッシュ（Private Input）を用いて、Circom回路 (`merkle_js/merkle.wasm`) と `snarkjs` (`merkle_final.zkey`) を介してGroth16証明を生成します。
-8.  **ブロックチェーン記録:** 生成されたZKPの公開入力と証明（calldata）は、`ethers.js` を用いて、スマートコントラクトの `recordProof` 関数を通じてEthereum Sepoliaブロックチェーンに記録されます。トランザクションハッシュが発行され、提出状況が更新されます。
+1.  **データ取得 (クライアント: `lib/main.dart`)**: モバイルクライアントは、`_controller.takePicture()` でカメラから画像を撮影し、`_location.onLocationChanged.listen` でGPSから位置情報を取得し、`FlutterBluePlus.scanResults.listen` でBluetooth LE経由で特定のドローンID (`_targetDroneId`) を検出します。
+2.  **ローカル処理 (クライアント: `lib/main.dart`)**: 取得した位置情報と撮影時刻に基づき、`_generateAllHashes` 関数内で複数の時間ウィンドウでPoseidonハッシュを生成し、その性能をベンチマークします。結果は `LocalDatabaseHelper.instance.createRecord` でSQLiteに保存されます。
+3.  **サーバー提出 (クライアント: `lib/main.dart` -> サーバー: `server.cjs`)**: クライアントは、`_submitApplication` 関数内で画像ファイル (`imageXFile.path`)、ドローンID、生成されたハッシュをバックエンドサーバーの `/submit` エンドポイントに `http.MultipartRequest` を用いて送信します。
+4.  **サーバー側データ保存 (サーバー: `server.cjs`)**: サーバーの `/submit` エンドポイントは `multer` ミドルウェアでデータを受信し、`uploads/` ディレクトリに一時保存します。提出状況は `updateSubmissionStatus` 関数で `submission-status.json` に記録されます。
+5.  **IPFSへのアップロード (サーバー: `server.cjs`)**: `/submit` エンドポイント内では、受け取った提出ディレクトリ全体が `ipfs.addAll` を用いてIPFSにアップロードされ、そのCIDが `updateSubmissionStatus` で記録されます。
+6.  **IPFSウォッチャー (サーバー: `server.cjs`)**: `startIpfsWatcher` 関数により、サーバーは定期的にIPFS/IPNSを監視し、`ipns-names.json` に基づいて特定のドローンIDに関連するデータ更新を検出します。`ipfs/retrieve-data.mjs` スクリプトが外部プロセスとして呼び出されます。
+7.  **ZKP生成 (サーバー: `server.cjs`)**: IPFSウォッチャーで更新が検出された場合、`processAllSubmissions` 関数が実行されます。この関数は、IPFSから取得したドローンデータとクライアントから提出されたハッシュ (`user_data.json` から読み込み) を用いて、`prepareInputs` 関数でCircomの入力 (`input.json`) を生成します。その後、`child_process.execSync` を使い、`snarkjs wtns calculate` でWitness (`witness.wtns`) を生成し、`snarkjs groth16 prove` でGroth16証明（`proof.json`, `public.json`）を生成します。
+8.  **ブロックチェーン記録 (サーバー: `server.cjs`)**: `processAllSubmissions` 関数内で、生成されたZKPの公開入力と証明（`snarkjs zkey export soliditycalldata` で生成されたcalldata）は、`ethers.js` を用いて、デプロイ済みのスマートコントラクト (`contract.recordProof`) を通じてEthereum Sepoliaブロックチェーンに記録されます。トランザクションハッシュが発行され、提出状況が更新されます。
 
 ### コンポーネント説明
-*   **Mobile App (Flutter):** ユーザーインターフェースを提供し、物理デバイスからのデータ（カメラ、GPS、BLE）を収集・前処理します。ローカルデータベースとセキュリティチェック機能を持ちます。
-*   **Backend Server (Node.js):** クライアントとブロックチェーン/IPFSの中継役。データ提出の受け入れ、ZKP生成処理のオーケストレーション、IPFSへの公開、ブロックチェーンへの記録を担当します。
-*   **Blockchain (Ethereum Sepolia):** 不変の台帳としてZKPの検証結果を永続的に記録します。ZKP検証用のスマートコントラクトがデプロイされています。
-*   **ZKP Circuit (Circom/snarkjs):** サーバー上で実行され、提供された入力が特定の条件（例：特定のハッシュがドローンデータと一致する）を満たすことを証明するゼロ知識証明を生成します。
-*   **IPFS (InterPlanetary File System):** 分散型ストレージシステム。ドローンデータや提出物の証拠データを非中央集権的に保存するために利用されます。
+*   **Mobile App (Flutter):** `lib/main.dart` をエントリポイントとし、`CameraScreen` (`_CameraScreenState`) でカメラ・GPS・BLEデータ収集、`LocalHistoryScreen` でローカル記録管理、`VerificationScreen` でZKP提出フローのUIを提供します。`LocalDatabaseHelper` クラスがSQLiteデータベースを抽象化します。
+*   **Backend Server (Node.js):** `server.cjs` をエントリポイントとし、`express` でAPIエンドポイントを定義します。`multer` でファイルアップロードを処理し、`child_process` を用いて外部のZKPツール (`snarkjs`) を実行します。`ethers.js` (`contract`) を介してブロックチェーンと連携します。
+*   **Blockchain (Ethereum Sepolia):** `deployed-address.json` で指定されたアドレスにデプロイされたスマートコントラクト（ABIは `CONTRACT_ABI` 定義）が、`recordProof` 関数を通じてZKPの検証結果を永続的に記録します。
+*   **ZKP Circuit (Circom/snarkjs):** サーバー上で `snarkjs` コマンドラインツールによって実行され、`./merkle_js/merkle.wasm` (Witness計算用) および `merkle_final.zkey` (Groth16証明生成用) を利用して、提供された入力が特定の条件を満たすことを証明するゼロ知識証明を生成します。ZKP入力は `prepareInputs` 関数 (`./prepare_inputs.js`) で整形されます。
+*   **IPFS (InterPlanetary File System):** `ipfs-http-client` ライブラリを通じてIPFSノードと連携します。`uploads/` ディレクトリの内容をIPFSにアップロードし、`ipns-names.json` と `ipfs/retrieve-data.mjs` を用いて特定のドローンデータの更新を監視します。
 
 ## 4. 技術仕様（Technical Details / Method）
 
 ### 使用技術
 *   **クライアント:**
-    *   **Flutter (Dart):** UIフレームワーク
-    *   `camera`: カメラ制御
-    *   `location`: GPSアクセス
-    *   `flutter_blue_plus`: Bluetooth LEスキャン
-    *   `sqflite`: ローカルDB
-    *   `poseidon`: Poseidonハッシュ関数
-    *   `safe_device`: デバイスセキュリティチェック
+    *   **Flutter (Dart):** UIフレームワーク。`lib/main.dart` がエントリポイント。
+    *   `camera` (`package:camera/camera.dart`): デバイスカメラへのアクセスと画像キャプチャ (`_controller.takePicture()`)。
+    *   `location` (`package:location/location.dart`): GPS位置情報のリアルタイム追跡 (`_location.onLocationChanged.listen`)。
+    *   `flutter_blue_plus` (`package:flutter_blue_plus/flutter_blue_plus.dart`): Bluetooth LEデバイスのスキャンとドローンIDの検出 (`_startBleScan`)。
+    *   `sqflite` (`package:sqflite/sqflite.dart`): ローカルSQLiteデータベースへのデータ保存と読み込み (`LocalDatabaseHelper`)。
+    *   `poseidon` (`package:poseidon/poseidon.dart`): ZKPフレンドリーなハッシュ関数。クライアント側で位置データからハッシュを計算 (`poseidon3` 関数)。
+    *   `safe_device` (`package:safe_device/safe_device.dart`): デバイスのRoot化/ジェイルブレイクや開発者モードの検出 (`_getDeviceUnsafeIssues`)。
 *   **サーバー:**
-    *   **Node.js:** ランタイム環境
-    *   `Express.js`: Webアプリケーションフレームワーク
-    *   `multer`: ファイルアップロード処理
-    *   `ethers.js`: Ethereum連携
-    *   `dotenv`: 環境変数管理
-    *   `ipfs-http-client`: IPFS連携
-    *   `child_process`: 外部コマンド実行 (`snarkjs`)
+    *   **Node.js:** ランタイム環境。`server.cjs` がエントリポイント。
+    *   `Express.js`: Webアプリケーションフレームワーク。REST APIエンドポイント (`app.post('/submit')` など) の定義。
+    *   `multer`: `multipart/form-data` の処理。クライアントからの画像ファイルアップロード (`upload.single('image')`)。
+    *   `ethers.js`: Ethereumブロックチェーンとの連携。コントラクトのインスタンス化 (`new ethers.Contract`) とトランザクション送信 (`contract.recordProof`)。
+    *   `dotenv`: 環境変数管理。`.env` ファイルからの `SEPOLIA_RPC_URL` や `PRIVATE_KEY` の読み込み。
+    *   `ipfs-http-client`: IPFSノードとの連携。ファイルの追加 (`ipfs.addAll`) や監視 (`startIpfsWatcher`)。
+    *   `child_process`: 外部コマンドの実行。`snarkjs` コマンドの呼び出し (`execSync`)。
 *   **ZKP:**
-    *   **Circom:** ZKP回路開発言語
-    *   **`snarkjs`:** ZKPプロバー/ベリファイアツール (Groth16実装)
-    *   `merkle_js/merkle.wasm`: Witness計算用のWASMファイル
-    *   `merkle_final.zkey`: Groth16証明生成用の最終的なZKey
+    *   **Circom:** ZKP回路開発言語。回路は `circom/` ディレクトリに定義され、`merkle_js/merkle.wasm` としてコンパイルされます。
+    *   **`snarkjs`:** ZKPプロバー/ベリファイアツール。Groth16実装を用いたWitness生成 (`snarkjs wtns calculate`) と証明生成 (`snarkjs groth16 prove`) に `execSync` で利用されます。
+    *   `merkle_js/merkle.wasm`: Circom回路からコンパイルされたWebAssemblyファイル。Witness計算に使用。
+    *   `merkle_final.zkey`: Groth16証明生成の際に使用する最終的なZKey（Trusted Setupの成果物）。
 *   **データストア:**
-    *   クライアント: SQLite (`zkp_verifier_v3.db`)
-    *   サーバー: ファイルシステム (`uploads/`, `submission-status.json`, `ipns-names.json`)
+    *   クライアント: SQLite (`zkp_verifier_v3.db`)。`LocalDatabaseHelper` クラスで管理。
+    *   サーバー: ファイルシステム (`uploads/`, `submission-status.json`, `ipns-names.json`)。`fs` や `fsPromises` モジュールでアクセス。
 
 ### API仕様
-#### サーバーエンドポイント
+#### サーバーエンドポイント (`server.cjs` にて定義)
 *   **`POST /submit`**
-    *   **説明:** クライアントから ZKP 生成用のデータ（画像、ハッシュ、ドローンID、撮影時刻、期間）を受け付けます。
+    *   **説明:** クライアントからのZKP生成用データを受け付けます。`server.cjs` の `app.post('/submit', upload.single('image'), ...)` で処理されます。
     *   **形式:** `multipart/form-data`
-    *   **フィールド:**
-        *   `image`: 画像ファイル (`req.file`)
-        *   `hash`: ハッシュ値の改行区切り文字列 (`req.body.hash`)
-        *   `droneId`: ドローンID (`req.body.droneId`)
-        *   `captureTime`: 撮影時刻 (ISO 8601形式文字列, `req.body.captureTime`)
-        *   `durationSeconds`: 選択された期間 (`req.body.durationSeconds`)
+    *   **リクエストボディ:**
+        *   `image`: タイプ `File`。アップロードされた画像ファイル (`req.file` としてアクセス)。
+        *   `hash`: タイプ `string`。クライアントで生成されたハッシュ値の改行区切り文字列 (`req.body.hash` としてアクセス)。
+        *   `droneId`: タイプ `string`。ドローンID (`req.body.droneId` としてアクセス)。
+        *   `captureTime`: タイプ `string`。ISO 8601形式の撮影時刻 (`req.body.captureTime` としてアクセス)。
+        *   `durationSeconds`: タイプ `string`。選択された期間 (`req.body.durationSeconds` としてアクセス)。
     *   **レスポンス:** `JSON { message: '申請を受け付けました。', submissionId: <string> }`
+    *   **エラーレスポンス:** `status 400` (不正なリクエスト) または `status 500` (サーバーエラー)。
 *   **`GET /submission-status/:submissionId`**
-    *   **説明:** 特定の提出IDの処理ステータスを返します。
+    *   **説明:** 特定の `submissionId` の処理ステータスを返します。`server.cjs` の `app.get('/submission-status/:submissionId', ...)` で処理されます。
     *   **形式:** `GET`
-    *   **パスパラメータ:** `submissionId`
-    *   **レスポンス:** `JSON { status: <string>, ... }` (例: `submitted`, `processing`, `proof_generated`, `completed`, `failed`)
+    *   **パスパラメータ:** `submissionId` (タイプ `string`)。
+    *   **レスポンス:** `JSON { status: <string>, ipfsCid: <string>?, transactionHash: <string>?, blockNumber: <number>?, performance: <object>?, error: <string>?, lastUpdated: <ISO 8601 string> }`
+    *   **エラーレスポンス:** `status 404` (指定された申請IDが見つからない)。
 *   **`POST /record-on-chain`**
-    *   **説明:** サーバーで生成された ZKP をブロックチェーンに記録します。ZKP生成はバックグラウンドプロセス (`processAllSubmissions`) で行われるため、このエンドポイントは実際には `processAllSubmissions` から呼び出されるコントラクト呼び出しをトリガーするもので、クライアントから直接呼び出されるものではありません。
-    *   **形式:** `POST`
-    *   **レスポンス:** `JSON { transactionHash: <string> }`
+    *   **説明:** サーバーで生成されたZKPをブロックチェーンに記録します。これは `processAllSubmissions` 関数内でスマートコントラクトを直接呼び出すもので、現在の実装ではクライアントから直接呼び出すエンドポイントではありません。
+    *   **形式:** `POST` (仮。実質的には内部呼び出し)
+    *   **レスポンス:** `JSON { transactionHash: <string> }` (内部処理で利用)
 *   **`GET /get-proof-events`**
-    *   **説明:** スマートコントラクトから `ProofRecorded` イベントのログを取得し、フォーマットして返します。
+    *   **説明:** スマートコントラクトから `ProofRecorded` イベントのログを取得し、フォーマットして返します。`server.cjs` の `app.get('/get-proof-events', ...)` で処理されます。
     *   **形式:** `GET`
-    *   **レスポンス:** `JSON Array of { transactionHash, blockNumber, timestamp, pubSignals }`
+    *   **レスポンス:** `JSON Array of { transactionHash: <string>, blockNumber: <number>, timestamp: <string>(JST), pubSignals: <string[]> }`
+    *   **エラーレスポンス:** `status 500` (ブロックチェーン接続エラーなど)。
 
 ### データ構造
-*   **`LocalRecord` (クライアント側 - SQLite):**
-    *   `id`: INTEGER PRIMARY KEY AUTOINCREMENT
-    *   `capture_time`: TEXT (ISO 8601)
-    *   `duration_seconds`: INTEGER (最大期間)
-    *   `drone_id`: TEXT
-    *   `image_path`: TEXT (ローカルファイルパス)
-    *   `hashes`: TEXT (JSON形式で `Map<int, List<String>>` を格納)
-*   **`ProcessLog` (クライアント側 - UI表示用):**
-    *   `name`: `ProcessName` (hashGeneration, applicationSubmission, chainRecording)
-    *   `status`: `ProcessStatus` (pending, inProgress, completed, error)
-    *   `duration`: `Duration`
-    *   `errorMessage`: `String?`
-    *   `submissionId`: `String?`
-*   **`submission-status.json` (サーバー側):**
-    *   キー: `submissionId` (文字列)
-    *   値: `JSON Object { status: <string>, ipfsCid: <string>, transactionHash: <string>, blockNumber: <number>, performance: <object>, error: <string>, lastUpdated: <ISO 8601 string> }`
+*   **`LocalRecord` (クライアント側 - SQLite: `lib/main.dart` の `LocalRecord` クラス):**
+    *   クライアントのローカルSQLiteデータベース `zkp_verifier_v3.db` の `records` テーブルに保存されるデータの構造を定義します。
+    *   `id`: `int?`。レコードの一意の識別子 (PRIMARY KEY AUTOINCREMENT)。
+    *   `captureTime`: `DateTime`。データがキャプチャされた時刻。`capture_time` として `TEXT (ISO 8601)` 形式でDBに保存されます。
+    *   `maxDuration`: `int`。ハッシュが生成された最大の期間（秒）。`duration_seconds` として `INTEGER` でDBに保存されます。
+    *   `droneId`: `String`。データが関連付けられているドローンのID。`drone_id` として `TEXT` でDBに保存されます。
+    *   `imagePath`: `String`。キャプチャされた画像のローカルファイルパス。`image_path` として `TEXT` でDBに保存されます。
+    *   `hashesMap`: `Map<int, List<String>>`。期間（秒数）をキーとし、その期間で生成されたハッシュのリストを値とするマップ。`hashes` として `TEXT` (JSON形式) でDBに保存されます。
+*   **`ProcessLog` (クライアント側 - UI表示用: `lib/main.dart` の `ProcessLog` クラス):**
+    *   `VerificationScreen` でZKP生成・提出プロセスの各ステップのUI表示状態を管理するためのデータ構造です。
+    *   `name`: `ProcessName` enum。ステップの種類 (`hashGeneration`, `applicationSubmission`, `chainRecording`)。
+    *   `status`: `ProcessStatus` enum。ステップの現在の状態 (`pending`, `inProgress`, `completed`, `error`)。
+    *   `duration`: `Duration?`。ステップの処理時間。
+    *   `errorMessage`: `String?`。エラーが発生した場合のメッセージ。
+    *   `submissionId`: `String?`。提出処理の場合のID。
+*   **`submission-status.json` (サーバー側: `server.cjs` で `readStatusFile`/`writeStatusFile` が管理):**
+    *   サーバーの `uploads/` ディレクトリに保存される、各提出の処理状況を追跡するためのJSONファイルです。
+    *   キー: `submissionId` (`string`)。提出の一意の識別子。
+    *   値: `JSON Object`。
+        *   `status`: `string`。現在の処理状態（例: `submitted`, `processing`, `proof_generated`, `completed`, `failed`）。
+        *   `ipfsCid`: `string?`。提出ディレクトリのIPFS CID。
+        *   `transactionHash`: `string?`。ブロックチェーンに記録されたトランザクションのハッシュ。
+        *   `blockNumber`: `number?`。トランザクションがマイニングされたブロック番号。
+        *   `performance`: `object?`。ブロックチェーン記録時のガス使用量などの性能データ。
+        *   `error`: `string?`。エラーメッセージ。
+        *   `lastUpdated`: `ISO 8601 string`。最終更新日時。
 *   **ZKP入力 (Circom `input.json`):**
-    *   `hashes`: クライアントから提出されたハッシュの配列（プライベート入力の一部）
-    *   `droneData`: IPFSから取得したドローンデータ（公開入力の一部）
-        *   例: `{ publicKey: "...", sensorData: {...} }` (詳細は `ipfs/retrieve-data.mjs` および `prepare_inputs.js` に依存)
+    *   `server.cjs` の `processAllSubmissions` 関数内で `prepareInputs` 関数 (`./prepare_inputs.js`) を通じて生成される、Circom回路への入力データです。
+    *   `hashes`: クライアントから提出されたハッシュの配列（プライベート入力の一部）。
+    *   `droneData`: IPFSから取得したドローンデータ（公開入力の一部）。例: `{ publicKey: "...", sensorData: {...} }`。 (`ipfs/retrieve-data.mjs` および `prepare_inputs.js` で詳細が定義されます)。
+
+
 
 ### プロトコル設計
-1.  **クライアント-サーバー通信:** HTTPS (SSL/TLS) を使用して暗号化された通信路を確立します。自己署名証明書 (`key.pem`, `cert.pem`) が使用されています。
+1.  **クライアント-サーバー通信:**
+    *   **HTTPS:** `lib/main.dart` の `MyHttpOverrides` クラスが、開発環境における自己署名証明書 (`key.pem`, `cert.pem` で `server.cjs` が `https.createServer` で利用) を許容する設定を提供します。これにより、クライアントはサーバーとのセキュアなHTTPS通信を確立します。
+    *   **APIリクエスト:** クライアントは `http.MultipartRequest` を使用して `server.cjs` のAPIエンドポイントと通信します。
 2.  **ZKP生成プロトコル (Groth16):**
-    *   **Setup:** `snarkjs groth16 setup` で生成された `merkle_final.zkey` を使用。
-    *   **Witness計算:** `snarkjs wtns calculate <wasm> <input.json> <witness.wtns>`
-    *   **Proof生成:** `snarkjs groth16 prove <zkey> <witness.wtns> <proof.json> <public.json>`
-    *   **Calldata生成:** `snarkjs zkey export soliditycalldata <public.json> <proof.json>`
-3.  **ブロックチェーン連携:** `ethers.js` を介してEthereum RPCに接続し、スマートコントラクトの `recordProof` 関数を呼び出します。イベント監視には `queryFilter` を使用します。
-4.  **IPFS/IPNS:** `ipfs-http-client` を使用してIPFSノードと連携。IPNSを用いて特定のドローンIDに関連する最新のコンテンツハッシュ（CID）を追跡します。
+    *   **オーケストレーション:** `server.cjs` の `processAllSubmissions` 関数が、ZKP生成の主要なステップをオーケストレーションします。
+    *   **Setup:** `merkle_final.zkey` は、Groth16のTrusted Setupフェーズで生成されたものです。このファイルは `processAllSubmissions` 内の `snarkjs groth16 prove` コマンドで利用されます。
+    *   **Witness計算:** `processAllSubmissions` 関数内で、`prepareInputs` 関数 (`./prepare_inputs.js`) によって生成された `input.json` と `merkle_js/merkle.wasm` を用いて、`child_process.execSync(\`snarkjs wtns calculate ...\`)` によりWitness (`witness.wtns`) が計算されます。
+    *   **Proof生成:** `processAllSubmissions` 関数内で、`merkle_final.zkey` と `witness.wtns` を用いて、`child_process.execSync(\`snarkjs groth16 prove ...\`)` により証明（`proof.json`）と公開入力（`public.json`）が生成されます。
+    *   **Calldata生成:** 生成された `proof.json` と `public.json` から、`child_process.execSync(\`snarkjs zkey export soliditycalldata ...\`)` を用いてスマートコントラクト呼び出し用のcalldataが生成されます。
+3.  **ブロックチェーン連携:**
+    *   `server.cjs` の `contract` オブジェクトは、`deployed-address.json` のコントラクトアドレスと `CONTRACT_ABI` を用いて `ethers.js` (`ethers.JsonRpcProvider`, `ethers.Wallet`, `ethers.Contract`) で初期化されます。
+    *   `processAllSubmissions` 関数内で、生成されたcalldataは `contract.recordProof(pA, pB, pC, pubSignals)` を呼び出すことでEthereum Sepoliaブロックチェーンに送信され、ZKPが記録されます。
+    *   イベント監視には `app.get('/get-proof-events')` エンドポイントで `contract.queryFilter('ProofRecorded')` が使用されます。
+4.  **IPFS/IPNS:**
+    *   `server.cjs` の `startServer` 関数内で `ipfs-http-client` ( `create` および `globSource` ) を用いてIPFSノード (`ipfs`) が初期化されます。
+    *   `/submit` エンドポイントでは `ipfs.addAll(globSource(submissionDir, '**/*'), { wrapWithDirectory: true })` を用いて提出ディレクトリがIPFSにアップロードされます。
+    *   `startIpfsWatcher` 関数は `ipns-names.json` を参照し、`child_process.exec(\`node ipfs/retrieve-data.mjs ...\`)` を用いて `ipfs/retrieve-data.mjs` スクリプトを実行することでIPNSエントリの更新を監視します。
 
 ### アルゴリズム
-*   **Poseidon Hash:** クライアント側で位置情報データ（緯度、経度、タイムスタンプ）をZKPフレンドリーなハッシュ関数でハッシュ化します。このハッシュは複数のポイント（中心点と周囲の点）に対して計算されます。
-*   **Groth16:** サーバー側で、Circomで定義された回路に基づいてGroth16プロトコルを用いてゼロ知識証明を生成します。具体的な回路ロジックは `merkle_js/merkle.circom` （または関連ファイル）に実装されていますが、提出されたハッシュとIPFS上のドローンデータとの照合ロジックが含まれていると推測されます。
+*   **Poseidon Hash (クライアント側: `lib/main.dart`):**
+    *   位置情報データ（緯度、経度、タイムスタンプ）は、`_generateCircularPoints` 関数および `_pointOnBearing` 関数によって、中心点とその周囲の複数の点に変換されます。
+    *   これらの各点に対して、`poseidon3([latInt, lonInt, targetTimeInt])` の形式でZKPフレンドリーなPoseidonハッシュ関数が適用され、ハッシュ値が計算されます。
+*   **Groth16 (サーバー側: `server.cjs`):**
+    *   サーバーの `processAllSubmissions` 関数が、`prepareInputs` (`./prepare_inputs.js`) によって生成された入力と `merkle_js/merkle.wasm` (Witness計算)、`merkle_final.zkey` (証明生成) を用いて、`snarkjs` を介してGroth16プロトコルによるゼロ知識証明を生成します。
+    *   具体的なZKP回路ロジックは `circom/merkle.circom`（または関連するCircomファイル）に実装されており、提出されたハッシュとIPFS上のドローンデータとの照合ロジックなどが含まれていると推測されます。
 
 ## 5. セットアップ方法（Setup / Installation）
 
@@ -268,15 +296,19 @@ flutter run
 
 ### デモ手順
 1.  **クライアントアプリの起動:** デバイスでアプリを開きます。セキュリティチェックがパスすると、カメラ画面が表示されます。
+    ![ドローン撮影画面](assets/photo.jpg)
 2.  **ドローンの検出:** アプリはBluetooth LEで特定のドローンID (`_targetDroneId` = `D8:3A:DD:E2:55:36`) を検索します。ドローンが検出されるまで待ちます（表示ステータス: "接続中: D8:3A:DD:E2:55:36"）。
 3.  **GPS捕捉:** アプリはGPS位置情報を捕捉します（表示ステータス: "GPS捕捉中..."）。
 4.  **写真撮影:** 画面下部のシャッターボタンをタップします。
+    <!-- GitHub Markdownではローカル動画の直接埋め込み再生はできません。リンクとして提供します。 -->
+    ドローン撮影時の動画: [demo.mp4](assets/demo.mp4)
 5.  **性能評価:** アプリは複数の期間（10秒〜60秒）で30回ハッシュ生成を行い、平均処理時間を計測・表示します。この間、"性能評価実行中..."のダイアログが表示されます。
 6.  **性能評価レポート:** 性能評価が完了すると、結果がダイアログとして表示されます。CSV形式でコピーするオプションもあります。
 7.  **検証画面への遷移:** レポートダイアログで「次へ進む」をタップし、検証画面に進みます。
 8.  **証明期間の選択:** 検証画面で、サーバーに提出するハッシュの期間（例: 30秒）を選択します。
 9.  **サーバーへ提出:** 「サーバーへ提出」ボタンをタップします。画像と選択された期間のハッシュがサーバーに送信されます。
 10. **ブロックチェーン記録:** サーバーでのZKP生成が完了し次第、「ブロックチェーン記録」ボタンが有効になります。これをタップすると、生成されたZKPがEthereum Sepoliaに記録されます。
+    ![申請送信画面の例](assets/send.jpg)
 11. **トランザクション確認:** 記録が完了すると、トランザクションハッシュが表示され、Etherscanで詳細を確認できます。
 
 ### API使用例 (サーバー)
@@ -352,6 +384,7 @@ fetch('https://localhost:3000/submit', {
 *   **ブロックチェーンによる不変性:** 一度ブロックチェーンに記録されたZKPは改ざん不可能であり、証明の信頼性を保証します。
 *   **セキュアな通信:** クライアントとサーバー間の通信はHTTPS (`key.pem`, `cert.pem`) で暗号化されており、盗聴や中間者攻撃を防ぎます。
 *   **デバイスのRoot化対策:** クライアントアプリは `safe_device` ライブラリを用いてデバイスのRoot化/ジェイルブレイクや開発者モードの有効化を検知し、安全でない環境での実行を拒否します。これにより、アプリのコード改ざんや機密情報（例：ローカルDB）への不正アクセスリスクを低減します。
+    ![不正検知画面の例](assets/safe.jpg)
 *   **分離された責任:** クライアントはデータ収集と提出、サーバーはZKP生成とオンチェーン記録という形で責任が分離されており、単一障害点のリスクを軽減します。
 
 ### プライバシー設計
@@ -418,4 +451,8 @@ fetch('https://localhost:3000/submit', {
     *   [Ethereum Documentation](https://ethereum.org/ja/developers/docs/)
     *   [ethers.js Documentation](https://docs.ethers.org/v6/)
 *   **Flutter:**
+<<<<<<< HEAD
     *   [Flutter Documentation](https://docs.flutter.dev/)
+=======
+    *   [Flutter Documentation](https://docs.flutter.dev/)
+>>>>>>> fcfacf2 (feat: Initial commit with project structure and README)

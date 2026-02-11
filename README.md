@@ -1,4 +1,4 @@
-# Poseidon Hash ZKP プロジェクト
+# zerosky
 
 ## 1. 研究背景・目的（Introduction）
 

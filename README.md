@@ -310,7 +310,6 @@ flutter run
 11. **トランザクション確認:** 記録が完了すると、トランザクションハッシュが表示され、Etherscanで詳細を確認できます。
    
 | | | |
-|---|---|---|
 | <img src="assets/safe.jpg" width="200"> | <img src="assets/photo.jpg" width="200"> | <img src="assets/send.jpg" width="200"> |
 
 

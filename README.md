@@ -308,22 +308,11 @@ flutter run
 9.  **サーバーへ提出:** 「サーバーへ提出」ボタンをタップします。画像と選択された期間のハッシュがサーバーに送信されます。
 10. **ブロックチェーン記録:** サーバーでのZKP生成が完了し次第、「ブロックチェーン記録」ボタンが有効になります。これをタップすると、生成されたZKPがEthereum Sepoliaに記録されます。
 11. **トランザクション確認:** 記録が完了すると、トランザクションハッシュが表示され、Etherscanで詳細を確認できます。
+   
+| | | |
+|---|---|---|
+| <img src="assets/safe.jpg" width="200"> | <img src="assets/photo.jpg" width="200"> | <img src="assets/send.jpg" width="200"> |
 
-<div style="display: flex; justify-content: center; gap: 20px;">
-
-    <div style="text-align: center;">
-        <img src="assets/safe.jpg" alt="不正検知画面の例" width="200">
-    </div>
-
-    <div style="text-align: center;">
-        <img src="assets/photo.jpg" alt="ドローン撮影画面" width="200">
-    </div>
-
-    <div style="text-align: center;">
-        <img src="assets/send.jpg" alt="申請送信画面の例" width="200">
-    </div>
-
-</div>
 
 
 ### API使用例 (サーバー)
